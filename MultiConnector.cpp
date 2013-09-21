@@ -30,36 +30,31 @@ void MultiConnector::run() {
     fd_set fds;
     FD_ZERO(&fds);
 
-    setupDomainSocket();
-
+    domainSocket = setupDomainSocket();
+    if (domainSocket < 0 ) {
+        std::cout << "Failed to create domain socket" << std::endl;
+        abort();
+    }
     FD_SET(domainSocket, &fds);
-    
-    clientSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (clientSocket == -1) {
-        perror("Socket");
+
+    clientSocket = setupClientV4Socket();
+    if (clientSocket < 0 ) {
+        std::cout << "Failed to create v4 client socket" << std::endl;
+        close(domainSocket);
         abort();
     }
-
-    struct sockaddr_in clientConnectAddr;
-
-    bzero(&clientConnectAddr, sizeof(struct sockaddr_in));
-    clientConnectAddr.sin_family = AF_INET;
-    clientConnectAddr.sin_addr.s_addr = htonl(INADDR_ANY);
-    clientConnectAddr.sin_port = htons(connectPort);
-
-    if (-1 == bind(clientSocket, (struct sockaddr *)&clientConnectAddr, 
-                   sizeof(struct sockaddr_in))) {
-        perror("Unable to bind client socket");
-        abort();
-    }
-
-    if (-1 == listen(clientSocket, SOMAXCONN)) {
-        perror("Unable to listen on client socket");
-        abort();
-    }
-
     FD_SET(clientSocket, &fds);
     int fdMax = clientSocket;
+
+    v6ClientSocket = setupClientV6Socket();
+    if (v6ClientSocket < 0 ) {
+        std::cout << "Failed to create v6 client socket" << std::endl;
+        std::cout << "Continue with v4 only" << std::endl;
+    } else {
+        FD_SET(v6ClientSocket, &fds);
+        fdMax = v6ClientSocket;
+    }
+
     int numClients = 0;
     bool waitOnFirstConnection=true;
     while(waitOnFirstConnection || (numClients > 0) || (workerList.size() > 0) ) {
@@ -83,6 +78,22 @@ void MultiConnector::run() {
                             close(newFd);
                         } else {
                         // else we'll handle it ourselves     
+                            numClients++;
+                            waitOnFirstConnection=false;
+                            FD_SET(newFd, &fds);
+                            if (newFd > fdMax) { fdMax = newFd; }
+                        }
+                    } 
+                } else if (i == v6ClientSocket) {
+                    int newFd = getNewClientConnection(i);
+                    if (newFd > 0) {
+                        // if we have workers let them handle it
+                        if (workerList.size() != 0) {
+                            int index = numClients % workerList.size(); 
+                            sendFd(newFd, workerList[index]);                        
+                            close(newFd);
+                        } else {
+                            // else we'll handle it ourselves     
                             numClients++;
                             waitOnFirstConnection=false;
                             FD_SET(newFd, &fds);
@@ -139,16 +150,17 @@ int MultiConnector::getNewWorkerConnection(int domainSocket) {
 
     sockaddr_in& ipv4Sock = *reinterpret_cast<sockaddr_in*>(&clientaddr);
     sockaddr_in6& ipv6Sock = *reinterpret_cast<sockaddr_in6*>(&clientaddr);
-    char ipAddrStr[INET_ADDRSTRLEN];
-    inet_ntop(ipv4Sock.sin_family, &clientaddr, ipAddrStr, clientaddrlen); 
+    char ipAddrStr[INET6_ADDRSTRLEN];
     if (ipv4Sock.sin_family == PF_LOCAL) {
         std::cout << "New local connection" << std::endl;
     }
     if (ipv4Sock.sin_family == AF_INET) {
+        inet_ntop(ipv4Sock.sin_family, &(ipv4Sock.sin_addr), ipAddrStr, sizeof(ipAddrStr)); 
         std::cout << "New ipv4 connection from " << ipAddrStr 
                   <<  " on socket " << newFd << std::endl;
     } 
     if (ipv6Sock.sin6_family == AF_INET6) {
+        inet_ntop(ipv6Sock.sin6_family, &(ipv6Sock.sin6_addr), ipAddrStr, sizeof(ipAddrStr)); 
         std::cout << "New ipv6 connection from " << ipAddrStr 
                   <<  " on socket " << newFd << std::endl;
     } 
@@ -168,7 +180,7 @@ int MultiConnector::getNewClientConnection(int clientSocket) {
     
     sockaddr_in& ipv4Sock = *reinterpret_cast<sockaddr_in*>(&clientaddr);
     sockaddr_in6& ipv6Sock = *reinterpret_cast<sockaddr_in6*>(&clientaddr);
-    char ipAddrStr[INET_ADDRSTRLEN];
+    char ipAddrStr[INET6_ADDRSTRLEN];
     if (ipv4Sock.sin_family == PF_LOCAL) {
         std::cout << "New local connection" << std::endl;
     }
@@ -181,7 +193,7 @@ int MultiConnector::getNewClientConnection(int clientSocket) {
         inet_ntop(ipv6Sock.sin6_family, &(ipv6Sock.sin6_addr), ipAddrStr, sizeof(ipAddrStr)); 
         std::cout << "New ipv6 connection from " << ipAddrStr 
                   <<  " on socket " << newFd << std::endl;
-    }
+    } 
  
     return newFd;
 }
@@ -262,24 +274,85 @@ void MultiConnector::parseOptions(int argc, char** argv) {
     return;
 }
 
-void MultiConnector::setupDomainSocket() {        
+int MultiConnector::setupDomainSocket() {        
     sockaddr_un domainAddr;
     domainAddr.sun_family = AF_UNIX;
     strcpy(domainAddr.sun_path, domainPath.c_str());
     unlink (domainAddr.sun_path);
-    domainSocket = socket(PF_UNIX, SOCK_STREAM, 0);
-    if (domainSocket < 0) {
+    int dSocket = socket(PF_UNIX, SOCK_STREAM, 0);
+    if (dSocket < 0) {
         perror("unable to create domain socket");
-        abort();
+        return dSocket;
     }
-    int ret = bind(domainSocket, reinterpret_cast<sockaddr*>(&domainAddr), sizeof(domainAddr));
+    int ret = bind(dSocket, reinterpret_cast<sockaddr*>(&domainAddr), sizeof(domainAddr));
     if (ret < 0) {
         perror("failed to bind domain socket");
-        abort();
+        return -1;
     }
-    ret = listen(domainSocket, SOMAXCONN);
+    ret = listen(dSocket, SOMAXCONN);
     if (ret < 0) {
         perror("Unable to listen on domain socket");
-        abort();
+        return -1;
     }
+    return dSocket;
+}
+
+int MultiConnector::setupClientV6Socket() {
+    int cSocket = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+    if (cSocket == -1) {
+        perror("Socket");
+        return cSocket;
+    }
+
+    int on = 1;
+    if (-1 == setsockopt(cSocket, IPPROTO_IPV6, IPV6_V6ONLY, (char*)&on, sizeof(on))) {
+        perror("unable to set IPV6_ONLY socket option");
+        // attempt to continue
+    }
+
+    sockaddr_in6 clientConnectAddr;
+    bzero(&clientConnectAddr, sizeof(struct sockaddr_in6));
+
+    clientConnectAddr.sin6_family = AF_INET6;
+    clientConnectAddr.sin6_port = htons(connectPort);
+    clientConnectAddr.sin6_addr = in6addr_any;
+
+    if (-1 == bind(cSocket, (struct sockaddr *)&clientConnectAddr, 
+                   sizeof(clientConnectAddr))) {
+        perror("Unable to bind ipv6 client socket");
+        return -1;
+    }
+
+    if (-1 == listen(cSocket, SOMAXCONN)) {
+        perror("Unable to listen on ipv6 client socket");
+        return -1;
+    }
+    return cSocket;
+}
+
+int MultiConnector::setupClientV4Socket() {
+    int cSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (cSocket == -1) {
+        perror("Socket");
+        return cSocket;
+    }
+
+    sockaddr_in clientConnectAddr;
+
+    bzero(&clientConnectAddr, sizeof(struct sockaddr_in));
+    clientConnectAddr.sin_family = AF_INET;
+    clientConnectAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    clientConnectAddr.sin_port = htons(connectPort);
+
+    if (-1 == bind(cSocket, (struct sockaddr *)&clientConnectAddr, 
+                   sizeof(struct sockaddr_in))) {
+        perror("Unable to bind ipv4 client socket");
+        return -1;
+    }
+
+    if (-1 == listen(cSocket, SOMAXCONN)) {
+        perror("Unable to listen on ipv4 client socket");
+        return -1;
+    }
+    return cSocket;
 }

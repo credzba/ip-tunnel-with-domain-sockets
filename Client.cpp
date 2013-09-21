@@ -5,9 +5,8 @@
 #include <time.h>
 
 #include <boost/program_options.hpp>
-using namespace boost::program_options;
-
 #include <boost/date_time.hpp>
+#include <boost/asio.hpp>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -19,15 +18,31 @@ Client::Client(int argc, char** argv) {
 }
 
 void Client::run() {
-    struct sockaddr_in connectorAddr;
-    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    sockaddr_storage connectorAddr;
+    bzero((void *) &connectorAddr, sizeof(connectorAddr));
+    
+    boost::asio::ip::address connectorIp = boost::asio::ip::address::from_string(connectorAddress) ;
 
+    int family = AF_INET;
+    if (connectorIp.is_v6()) {
+        family=AF_INET6;
+    }
+    int sock = socket(family, SOCK_STREAM, IPPROTO_TCP);
     if (sock == -1) perror("Socket");
 
-    bzero((void *) &connectorAddr, sizeof(connectorAddr));
-    connectorAddr.sin_family = AF_INET;
-    connectorAddr.sin_port = htons(connectPort);
-    connectorAddr.sin_addr.s_addr = inet_addr(connectorAddress.c_str());
+    if (connectorIp.is_v4()) {
+        sockaddr_in& sockAddr = *reinterpret_cast<sockaddr_in*>(&connectorAddr);
+        sockAddr.sin_family = AF_INET;
+        sockAddr.sin_port = htons(connectPort);
+        inet_pton(sockAddr.sin_family, connectorAddress.c_str(), &(sockAddr.sin_addr.s_addr));
+    }
+
+    if (connectorIp.is_v6()) {
+        sockaddr_in6& sockAddr = *reinterpret_cast<sockaddr_in6*>(&connectorAddr);
+        sockAddr.sin6_family = AF_INET6;
+        sockAddr.sin6_port = htons(connectPort);
+        inet_pton(sockAddr.sin6_family, connectorAddress.c_str(), &(sockAddr.sin6_addr));
+    }
 
     if (-1 == connect(sock, (struct sockaddr *)&connectorAddr, sizeof(connectorAddr))) {
         perror("Connect");
@@ -55,12 +70,12 @@ void Client::parseOptions(int argc, char** argv) {
     connectPort = 6789;
     connectorAddress = "127.0.0.1";
     try {
-        options_description desc("Options");
+        boost::program_options::options_description desc("Options");
         desc.add_options()
         ("help", "print help messages")
-        ("maxClients,m", value<unsigned int>(&maxClients), "maximum clients")
-        ("port,p", value<unsigned int>(&connectPort), "port to connect to")
-        ("ip,i", value<std::string>(&connectorAddress), "port to connect to")
+        ("maxClients,m", boost::program_options::value<unsigned int>(&maxClients), "maximum clients")
+        ("port,p", boost::program_options::value<unsigned int>(&connectPort), "port to connect to")
+        ("ip,i", boost::program_options::value<std::string>(&connectorAddress), "port to connect to")
         ;
         try {
             store(parse_command_line(argc, argv, desc), options_map);
@@ -70,12 +85,12 @@ void Client::parseOptions(int argc, char** argv) {
             }
             notify(options_map);
         }
-        catch (const error& e) {
+        catch (const boost::program_options::error& e) {
             std::cout << "some parse error " << e.what() << std::endl; 
             throw;
         }
     }
-    catch (const error& e) {
+    catch (const boost::program_options::error& e) {
         std::cout << "some other parse error " << e.what() << std::endl; 
         throw;
     }    
