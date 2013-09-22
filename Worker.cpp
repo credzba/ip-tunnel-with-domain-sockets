@@ -17,53 +17,69 @@ using namespace boost::program_options;
 // domain socket includes
 #include <linux/un.h>
 
+#include <sys/epoll.h>
+
 Worker::Worker(int argc, char** argv) {
     parseOptions(argc, argv);
+}
+
+inline void addToEpoll(int newFd, int epollFd) {
+    epoll_event  event;
+    event.events = EPOLLIN|EPOLLPRI|EPOLLERR;
+    event.data.fd = newFd;
+    if (epoll_ctl(epollFd, EPOLL_CTL_ADD, newFd, &event) != 0) {
+        perror("epoll_ctr add fd failed.");
+        abort();
+    }
+}
+
+inline void removeFromEpoll(int removedFd, int epollFd) {
+    epoll_event  event;
+    event.events = EPOLLIN|EPOLLPRI|EPOLLERR;
+    event.data.fd = removedFd;
+    if (epoll_ctl(epollFd, EPOLL_CTL_DEL, removedFd, &event) != 0) {
+        perror("epoll_ctr remove fd failed.");
+        abort();
+    }
 }
 
 static const unsigned int CONTROLLEN = CMSG_LEN(sizeof(int ));
 
 void Worker::run() {
 
-    fd_set fds;
-    FD_ZERO(&fds);
+    int epollFd = epoll_create1(0);
+    epoll_event event;
 
     int multiConn = setupConnection();
 
-    FD_SET(multiConn, &fds);
-    int fdMax = multiConn;
+    addToEpoll(multiConn, epollFd);
 
     while(1) {
-        fd_set readfds = fds;
-        int rc = select(fdMax+1, &readfds, NULL, NULL, NULL);
-        if (rc == -1) {
-            perror("Select");
-            break;
+        int fds = epoll_wait(epollFd, &event, 1, -1);
+        if (fds < 0) {
+            perror("epoll error");
+            abort();
         }
+        if (fds == 0) continue;
 
         // run through connections looking for data to read
-        for (int i = 0; i < fdMax+1; i++) {
-            if (FD_ISSET(i, &readfds)) {
-                if (i == multiConn) {
-                    int newFd = getNewFileDescriptor(i);
-                    FD_SET(newFd, &fds);
-                    if (newFd > fdMax) { fdMax = newFd; }
-                } else {
-                    // handle client data
-                    static const unsigned int messageLength = 200; 
-                    char message[messageLength];
-                    int in = recv(i, &message, messageLength-1, 0);
-                    message[in]='\0';
-                    if (in > 0) {
-                        printf("%d:%s\n", in, message);
-                    } else {
-                        if (in <= 0) {
-                            std::cout << "connection error or closed" << std::endl;
-                            close(i);
-                            FD_CLR(i, &fds);
-                        }                        
-                    }
-                }
+        if (event.data.fd == multiConn) {
+            int newFd = getNewFileDescriptor(event.data.fd);
+            addToEpoll(newFd, epollFd);
+        } else {
+            // handle client data
+            static const unsigned int messageLength = 200; 
+            char message[messageLength];
+            int in = recv(event.data.fd, &message, messageLength-1, 0);
+            message[in]='\0';
+            if (in > 0) {
+                printf("%d:%s\n", in, message);
+            } else {
+                if (in <= 0) {
+                    std::cout << "connection error or closed" << std::endl;
+                    removeFromEpoll(event.data.fd, epollFd);
+                    close(event.data.fd);
+                }                        
             }
         }
     }

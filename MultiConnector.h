@@ -3,7 +3,8 @@
 
 #include <boost/program_options.hpp>
 #include <string>
-
+#include <map>
+#include <sys/socket.h>
 
 class MultiConnector {
 public:
@@ -35,8 +36,12 @@ private:
     int clientSocket;
     int v6ClientSocket;
 
-    typedef std::vector<int> WorkerProcesses;
-    WorkerProcesses workerList;
+    struct WorkerData {
+        int useCount;
+        ucred credentials;
+    };
+    typedef std::map<int, WorkerData> WorkerList;
+    WorkerList workerList;
 
 };
 

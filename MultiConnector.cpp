@@ -17,6 +17,8 @@
 
 #include <vector>
 
+#include <sys/epoll.h>
+
 static const unsigned int MAXLINE=200;
 
 
@@ -25,17 +27,38 @@ MultiConnector::MultiConnector(int argc, char** argv) {
     parseOptions(argc, argv);
 }
 
-void MultiConnector::run() {
-    
-    fd_set fds;
-    FD_ZERO(&fds);
+inline void addToEpoll(int newFd, int epollFd) {
+    epoll_event  event;
+    event.events = EPOLLIN|EPOLLPRI|EPOLLERR;
+    event.data.fd = newFd;
+    if (epoll_ctl(epollFd, EPOLL_CTL_ADD, newFd, &event) != 0) {
+        perror("epoll_ctr add fd failed.");
+        abort();
+    }
+}
 
+inline void removeFromEpoll(int removedFd, int epollFd) {
+    epoll_event  event;
+    event.events = EPOLLIN|EPOLLPRI|EPOLLERR;
+    event.data.fd = removedFd;
+    if (epoll_ctl(epollFd, EPOLL_CTL_DEL, removedFd, &event) != 0) {
+        perror("epoll_ctr remove fd failed.");
+        abort();
+    }
+}
+
+void MultiConnector::run() {
+
+    int epollFd = epoll_create1(0);
+    epoll_event event;
+    
     domainSocket = setupDomainSocket();
     if (domainSocket < 0 ) {
         std::cout << "Failed to create domain socket" << std::endl;
         abort();
     }
-    FD_SET(domainSocket, &fds);
+
+    addToEpoll(domainSocket, epollFd);
 
     clientSocket = setupClientV4Socket();
     if (clientSocket < 0 ) {
@@ -43,93 +66,122 @@ void MultiConnector::run() {
         close(domainSocket);
         abort();
     }
-    FD_SET(clientSocket, &fds);
-    int fdMax = clientSocket;
+    addToEpoll(clientSocket, epollFd);
 
     v6ClientSocket = setupClientV6Socket();
     if (v6ClientSocket < 0 ) {
         std::cout << "Failed to create v6 client socket" << std::endl;
         std::cout << "Continue with v4 only" << std::endl;
     } else {
-        FD_SET(v6ClientSocket, &fds);
-        fdMax = v6ClientSocket;
+        addToEpoll(v6ClientSocket, epollFd);
     }
 
     int numClients = 0;
     bool waitOnFirstConnection=true;
     while(waitOnFirstConnection || (numClients > 0) || (workerList.size() > 0) ) {
-        fd_set readfds = fds;
-        int rc = select(fdMax+1, &readfds, NULL, NULL, NULL);        
-        if (rc == -1) {
-            perror("Select failure");
-            break;
+        int fds = epoll_wait(epollFd, &event, 1, -1);
+        if (fds < 0) {
+            perror("epoll error");
+            abort();
         }
-        
-        // run through connections looking for data to read
-        for (int i = 0; i < fdMax+1; i++) {
-            if (FD_ISSET(i, &readfds)) {
-                if (i == clientSocket) {
-                    int newFd = getNewClientConnection(i);
-                    if (newFd > 0) {
-                        // if we have workers let them handle it
-                        if (workerList.size() != 0) {
-                            int index = numClients % workerList.size(); 
-                            sendFd(newFd, workerList[index]);                        
-                            close(newFd);
-                        } else {
-                        // else we'll handle it ourselves     
-                            numClients++;
-                            waitOnFirstConnection=false;
-                            FD_SET(newFd, &fds);
-                            if (newFd > fdMax) { fdMax = newFd; }
+        if (fds == 0) continue;
+
+        if (event.data.fd == clientSocket) {
+            int newFd = getNewClientConnection(event.data.fd);
+            if (newFd > 0) {
+                // if we have workers let them handle it
+                if (workerList.size() != 0) {
+                    int fdToAssignTo=-1;
+                    int fdCount = 9999;
+                    for (WorkerList::iterator iter = workerList.begin();
+                         iter != workerList.end();
+                         iter++) {
+                        if (iter->second.useCount < fdCount) {
+                            fdToAssignTo = iter->first;
+                            fdCount = iter->second.useCount;
                         }
-                    } 
-                } else if (i == v6ClientSocket) {
-                    int newFd = getNewClientConnection(i);
-                    if (newFd > 0) {
-                        // if we have workers let them handle it
-                        if (workerList.size() != 0) {
-                            int index = numClients % workerList.size(); 
-                            sendFd(newFd, workerList[index]);                        
-                            close(newFd);
-                        } else {
-                            // else we'll handle it ourselves     
-                            numClients++;
-                            waitOnFirstConnection=false;
-                            FD_SET(newFd, &fds);
-                            if (newFd > fdMax) { fdMax = newFd; }
-                        }
-                    } 
-                } else if (i == domainSocket) {
-                    int newFd = getNewWorkerConnection(i);
-                    if (newFd > 0) {
-                        FD_SET(newFd, &fds);
-                        if (newFd > fdMax) { fdMax = newFd; }
-                        workerList.push_back(newFd);
-                        waitOnFirstConnection=false;
                     }
+                    workerList[fdToAssignTo].useCount = fdCount+1;
+                    std::stringstream reply;
+                    reply << "There are " << workerList.size() << " workers, your assigned to pid " << workerList[fdToAssignTo].credentials.pid;
+                    send(newFd, reply.str().c_str(), reply.str().size(), 0); 
+                    sendFd(newFd, fdToAssignTo);                        
+                    close(newFd);
                 } else {
-                    // handle client data
-                    static const unsigned int messageLength = 200; 
-                    char message[messageLength];
-                    int in = recv(i, &message, messageLength-1, 0);
-                    message[in]='\0';
-                    if (in > 0) {
-                        std::cout << message << std::endl;
-                    } else {
-                        if (in <= 0) {
-                            std::cout << "connection error or closed" << std::endl;
-                            close(i);
-                            FD_CLR(i, &fds);
-                            WorkerProcesses::iterator iter = find(workerList.begin(), workerList.end(), i);
-                            if (iter != workerList.end()) {
-                                workerList.erase(iter);
-                            } else {
-                                numClients--;
-                            }
-                        }                        
-                    }
+                    // else we'll handle it ourselves     
+                    std::stringstream reply;
+                    reply << "There are no workers, server will deal with you";
+                    send(newFd, reply.str().c_str(), reply.str().size(), 0); 
+                    numClients++;
+                    waitOnFirstConnection=false;
+                    addToEpoll(newFd, epollFd);
                 }
+            } 
+        } else if (event.data.fd == v6ClientSocket) {
+            int newFd = getNewClientConnection(event.data.fd);
+            if (newFd > 0) {
+                // if we have workers let them handle it
+                if (workerList.size() != 0) {
+                    int fdToAssignTo=-1;
+                    int fdCount = 9999;
+                    for (WorkerList::iterator iter = workerList.begin();
+                         iter != workerList.end();
+                         iter++) {
+                        if (iter->second.useCount < fdCount) {
+                            fdToAssignTo = iter->first;
+                            fdCount = iter->second.useCount;
+                        }
+                    }
+                    workerList[fdToAssignTo].useCount = fdCount+1;
+                    std::stringstream reply;
+                    reply << "There are " << workerList.size() << " workers, your assigned to pid " << workerList[fdToAssignTo].credentials.pid;
+                    send(newFd, reply.str().c_str(), reply.str().size(), 0); 
+                    sendFd(newFd, fdToAssignTo);                        
+                    close(newFd);
+                } else {
+                    // else we'll handle it ourselves     
+                    numClients++;
+                    waitOnFirstConnection=false;
+                    addToEpoll(newFd, epollFd);
+                }
+            } 
+        } else if (event.data.fd == domainSocket) {
+            int newFd = getNewWorkerConnection(event.data.fd);
+            if (newFd > 0) {
+                addToEpoll(newFd, epollFd);
+                WorkerData workData;
+                workData.useCount = 0;
+                socklen_t ucred_length = sizeof(workData.credentials);
+                if (getsockopt(newFd,
+                               SOL_SOCKET,
+                               SO_PEERCRED,
+                               &workData.credentials,
+                               &ucred_length)) {
+                        std::cout << "unable to get credentials for fd " << newFd << std::endl;
+                    }
+                workerList[newFd] = workData;
+                waitOnFirstConnection=false;
+            }
+        } else {
+            // handle client data
+            static const unsigned int messageLength = 200; 
+            char message[messageLength];
+            int in = recv(event.data.fd, &message, messageLength-1, 0);
+            message[in]='\0';
+            if (in > 0) {
+                std::cout << message << std::endl;
+            } else {
+                if (in <= 0) {
+                    std::cout << "connection error or closed" << std::endl;
+                    removeFromEpoll(event.data.fd, epollFd);
+                    close(event.data.fd);
+                    WorkerList::iterator iter = workerList.find(event.data.fd);
+                    if (iter != workerList.end()) {
+                        workerList.erase(iter);
+                    } else {
+                        numClients--;
+                    }
+                }                        
             }
         }
     }
