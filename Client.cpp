@@ -13,38 +13,17 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#include <sys/epoll.h>
-
 
 Client::Client(int argc, char** argv) {
     parseOptions(argc, argv);
 }
 
-inline void addToEpoll(int newFd, int epollFd) {
-    epoll_event  event;
-    event.events = EPOLLIN|EPOLLPRI|EPOLLERR;
-    event.data.fd = newFd;
-    if (epoll_ctl(epollFd, EPOLL_CTL_ADD, newFd, &event) != 0) {
-        perror("epoll_ctr add fd failed.");
-        abort();
-    }
-}
-
-inline void removeFromEpoll(int removedFd, int epollFd) {
-    epoll_event  event;
-    event.events = EPOLLIN|EPOLLPRI|EPOLLERR;
-    event.data.fd = removedFd;
-    if (epoll_ctl(epollFd, EPOLL_CTL_DEL, removedFd, &event) != 0) {
-        perror("epoll_ctr remove fd failed.");
-        abort();
-    }
-}
-
 void Client::run() {
-    int epollFd = epoll_create1(0);
-    epoll_event event;
+    fd_set fds;
+    FD_ZERO(&fds);
 
-    addToEpoll(STDIN_FILENO, epollFd);
+    FD_SET(STDIN_FILENO, &fds);
+    int fdMax = STDIN_FILENO;
 
     sockaddr_storage connectorAddr;
     bzero((void *) &connectorAddr, sizeof(connectorAddr));    
@@ -75,39 +54,44 @@ void Client::run() {
         perror("Connect");
         abort();
     }
-    addToEpoll(sock, epollFd);
-
+    FD_SET(sock, &fds);
+    if (sock > fdMax) { fdMax = sock; }
     while(1) {
-        int fds = epoll_wait(epollFd, &event, 1, -1);
-        if (fds < 0) {
-            perror("epoll error");
-            abort();
+        fd_set readfds = fds;
+        int rc = select(fdMax+1, &readfds, NULL, NULL, NULL);        
+        if (rc == -1) {
+            perror("Select failure");
+            break;
         }
-        if (fds == 0) continue;
-
-        if (event.data.fd == sock) {
-            // handle server information
-            static const unsigned int messageLength = 200; 
-            char message[messageLength];
-            int in = recv(event.data.fd, &message, messageLength-1, 0);
-            message[in]='\0';
-            if (in > 0) {
-                std::cout << message << std::endl;
-            } else {
-                if (in <= 0) {
-                    std::cout << "connection error or closed" << std::endl;
-                    close(event.data.fd);
-                    break;
-                }                        
+        
+        // run through connections looking for data to read
+        for (int i = 0; i < fdMax+1; i++) {
+            if (FD_ISSET(i, &readfds)) {
+                if (i  == sock) {
+                    // handle server information
+                    static const unsigned int messageLength = 200; 
+                    char message[messageLength];
+                    int in = recv(i, &message, messageLength-1, 0);
+                    message[in]='\0';
+                    if (in > 0) {
+                        std::cout << message << std::endl;
+                    } else {
+                        if (in <= 0) {
+                            std::cout << "connection error or closed" << std::endl;
+                            close(i);
+                            break;
+                        }
+                    }
+                }
+                if (i == STDIN_FILENO) {
+                    std::string message;
+                    std::cin >> message;
+                    if (message[message.size()] == '\n') {
+                        message[message.size()] = '\0';
+                    }
+                    send(sock, message.c_str(), message.size(), 0);
+                }
             }
-        }
-        if (event.data.fd == STDIN_FILENO) {
-            std::string message;
-            std::cin >> message;
-            if (message[message.size()] == '\n') {
-                message[message.size()] = '\0';
-            }
-            send(sock, message.c_str(), message.size(), 0);
         }
     }
         
