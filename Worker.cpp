@@ -13,8 +13,7 @@
 #include <arpa/inet.h>
 
 // domain socket includes
-//#include <boost/asio/local/stream_protocol.hpp>
-#include <linux/un.h>
+#include <boost/asio/local/stream_protocol.hpp>
 
 #include <sys/epoll.h>
 
