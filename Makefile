@@ -5,7 +5,8 @@ CFLAGS=-g
 INCLUDES=-I/usr/include/boost -I/usr/local/include/clang
 LIBS=-L/usr/lib -lboost_system -lboost_program_options -lpthread  -L/usr/lib/x86_64-linux-gnu/ -lssl
 
-ALL : connector worker client cscope.out
+.PHONY: all
+all : connector worker client cscope.out
 
 %.o : %.cpp
 	$(CPP) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -c $< -o $@

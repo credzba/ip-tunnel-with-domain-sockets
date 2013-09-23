@@ -5,8 +5,6 @@
 #include <time.h>
 
 #include <boost/program_options.hpp>
-using namespace boost::program_options;
-
 #include <boost/date_time.hpp>
 
 // socket includes
@@ -15,6 +13,7 @@ using namespace boost::program_options;
 #include <arpa/inet.h>
 
 // domain socket includes
+//#include <boost/asio/local/stream_protocol.hpp>
 #include <linux/un.h>
 
 #include <sys/epoll.h>
@@ -164,10 +163,10 @@ void Worker::parseOptions(int argc, char** argv) {
     domainPath = "/tmp/shared.fd";
 
    try {
-        options_description desc("Options");
+        boost::program_options::options_description desc("Options");
         desc.add_options()
         ("help", "print help messages")
-        ("domainPath,d", value<std::string>(&domainPath), "file to be used as name for domain socket")
+        ("domainPath,d", boost::program_options::value<std::string>(&domainPath), "file to be used as name for domain socket")
         ;
         try {
             store(parse_command_line(argc, argv, desc), options_map);
@@ -177,12 +176,12 @@ void Worker::parseOptions(int argc, char** argv) {
             }
             notify(options_map);
         }
-        catch (const error& e) {
+        catch (const boost::program_options::error& e) {
             std::cout << "some parse error " << e.what() << std::endl; 
             throw;
         }
     }
-    catch (const error& e) {
+    catch (const boost::program_options::error& e) {
         std::cout << "some other parse error " << e.what() << std::endl; 
         throw;
     }    
