@@ -104,6 +104,7 @@ void Client::parseOptions(int argc, char** argv) {
     unsigned int maxClients=5;
     connectPort = 6789;
     connectorAddress = "127.0.0.1";
+    secure=false;
     try {
         boost::program_options::options_description desc("Options");
         desc.add_options()
@@ -111,6 +112,7 @@ void Client::parseOptions(int argc, char** argv) {
         ("maxClients,m", boost::program_options::value<unsigned int>(&maxClients), "maximum clients")
         ("port,p", boost::program_options::value<unsigned int>(&connectPort), "port to connect to")
         ("ip,i", boost::program_options::value<std::string>(&connectorAddress), "port to connect to")
+        ("secure,s", boost::program_options::bool_switch(&secure), "use ssl for communications")
         ;
         try {
             store(parse_command_line(argc, argv, desc), options_map);

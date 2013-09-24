@@ -17,6 +17,7 @@ private:
     // variables
     unsigned int connectPort;
     std::string connectorAddress;
+    bool secure;
 
     // Parsed argument values
     boost::program_options::variables_map options_map;
