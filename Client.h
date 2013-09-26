@@ -1,6 +1,9 @@
 #ifndef CLIENT_H
 #define CLIENT_H
 
+#include <openssl/ossl_typ.h>
+#include <openssl/ssl.h>
+
 #include <boost/program_options.hpp>
 #include <string>
 
@@ -21,6 +24,10 @@ private:
 
     // Parsed argument values
     boost::program_options::variables_map options_map;
+
+    SSL_CTX         *ctx;
+    SSL            *ssl;
+    const SSL_METHOD      *meth;
 
 };
 

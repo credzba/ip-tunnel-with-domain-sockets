@@ -294,14 +294,12 @@ int MultiConnector::sendFd(int fd_to_send, int fd_of_worker)
 void MultiConnector::parseOptions(int argc, char** argv) {
     
     // default values
-    maxClients=5;
     domainPath = "/tmp/shared.fd";
     connectPort = 6789;
     try {
         boost::program_options::options_description desc("Options");
         desc.add_options()
         ("help", "print help messages")
-        ("maxClients,m", boost::program_options::value<unsigned int>(&maxClients), "maximum clients")
         ("port,p", boost::program_options::value<unsigned int>(&connectPort), "port to connect to")
         ("domainPath,d", boost::program_options::value<std::string>(&domainPath), "file to be used as name for domain socket")
         ;
@@ -322,7 +320,7 @@ void MultiConnector::parseOptions(int argc, char** argv) {
         std::cout << "some other parse error " << e.what() << std::endl; 
         throw;
     }    
-    std::cout << "mac clients supported " << maxClients << std::endl;    
+
     return;
 }
 

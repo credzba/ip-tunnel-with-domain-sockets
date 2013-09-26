@@ -13,9 +13,38 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+#include <openssl/bio.h> // BIO objects for I/O
+#include <openssl/ssl.h> // SSL and SSL_CTX for SSL connections
+#include <openssl/err.h> // Error reporting
+
 
 Client::Client(int argc, char** argv) {
     parseOptions(argc, argv);
+
+    /* Initializing OpenSSL */
+    SSL_library_init();
+    SSL_load_error_strings();
+    ERR_load_BIO_strings();
+    OpenSSL_add_all_algorithms();
+    
+    meth = SSLv3_method();
+    ctx = SSL_CTX_new(meth);
+    if (NULL == ctx) {
+        std::cerr << "unable to create SSL ctx" << std::endl;
+        abort();
+    }
+
+    /* Load the RSA CA certificate into the SSL_CTX structure */
+    /* This will allow this client to verify the server's     */
+    /* certificate.                                           */
+    
+    const std::string RSA_CLIENT_CA_CERT("./cluster.cert");
+    if (!SSL_CTX_load_verify_locations(ctx, RSA_CLIENT_CA_CERT.c_str(), NULL)) {
+        ERR_print_errors_fp(stderr);
+        exit(1);
+    }
+    
+
 }
 
 void Client::run() {
@@ -56,6 +85,7 @@ void Client::run() {
     }
     FD_SET(sock, &fds);
     if (sock > fdMax) { fdMax = sock; }
+
     while(1) {
         fd_set readfds = fds;
         int rc = select(fdMax+1, &readfds, NULL, NULL, NULL);        
@@ -75,6 +105,27 @@ void Client::run() {
                     message[in]='\0';
                     if (in > 0) {
                         std::cout << message << std::endl;
+                        if (secure == true) { 
+                            ssl = SSL_new(ctx);
+                            if (NULL == ssl) {
+                                std::cerr << "unable to create new SSL connection" << std::endl;
+                                abort();
+                            }                        
+                            // flag it as client side
+                            SSL_set_connect_state(ssl);
+
+                            int err = SSL_set_fd(ssl, sock);
+                            if (err == 0) {
+                                std::cerr << "unable to set socket into ssl structure" << std::endl;
+                                abort();
+                            }
+                            /* Perform SSL Handshake on the SSL client */
+                            err = SSL_connect(ssl);                        
+                            if (err == 0) {
+                                std::cerr << "unable to negotiate ssl handshake" << std::endl;
+                                abort();
+                            }
+                        }
                     } else {
                         if (in <= 0) {
                             std::cout << "connection error or closed" << std::endl;
@@ -84,12 +135,24 @@ void Client::run() {
                     }
                 }
                 if (i == STDIN_FILENO) {
-                    std::string message;
-                    std::cin >> message;
-                    if (message[message.size()] == '\n') {
-                        message[message.size()] = '\0';
+                    static const unsigned int MAXLINE=200;
+                    char buf[MAXLINE];
+                    std::cin.getline(buf, MAXLINE);
+                    int bufSize = strlen(buf);
+                    if (buf[bufSize] == '\n') {
+                        buf[bufSize] = '\0';
+                        bufSize--;
                     }
-                    send(sock, message.c_str(), message.size(), 0);
+                    if (bufSize > 0) {
+                        if (secure == true) {
+                            int bytesWritten  = SSL_write(ssl, buf, bufSize);
+                            if (bytesWritten == 0) {
+                                std::cerr << "unable to write secure data" << std::endl; 
+                            }
+                        } else {
+                            send(sock, buf, bufSize, 0);
+                        }
+                    }
                 }
             }
         }
@@ -101,15 +164,13 @@ void Client::run() {
 
 void Client::parseOptions(int argc, char** argv) {
         
-    unsigned int maxClients=5;
     connectPort = 6789;
     connectorAddress = "127.0.0.1";
-    secure=false;
+    secure = false;
     try {
         boost::program_options::options_description desc("Options");
         desc.add_options()
         ("help", "print help messages")
-        ("maxClients,m", boost::program_options::value<unsigned int>(&maxClients), "maximum clients")
         ("port,p", boost::program_options::value<unsigned int>(&connectPort), "port to connect to")
         ("ip,i", boost::program_options::value<std::string>(&connectorAddress), "port to connect to")
         ("secure,s", boost::program_options::bool_switch(&secure), "use ssl for communications")
@@ -131,7 +192,12 @@ void Client::parseOptions(int argc, char** argv) {
         std::cout << "some other parse error " << e.what() << std::endl; 
         throw;
     }    
-    std::cout << "mac clients supported " << maxClients << std::endl;    
+ 
+   if (secure) {
+       std::cout << "Client will connect securely" << std::endl;
+   } else {
+       std::cout << "Client will connect with plain text" << std::endl;
+   }
     return;
 }
 

@@ -18,8 +18,51 @@
 
 #include <sys/epoll.h>
 
+#include <openssl/bio.h> // BIO objects for I/O
+#include <openssl/ssl.h> // SSL and SSL_CTX for SSL connections
+#include <openssl/err.h> // Error reporting
+
+
 Worker::Worker(int argc, char** argv) {
     parseOptions(argc, argv);
+
+    /* Initializing OpenSSL */
+    SSL_library_init();
+    SSL_load_error_strings();
+    ERR_load_BIO_strings();
+    OpenSSL_add_all_algorithms();
+    
+    meth = SSLv3_method();
+    ctx = SSL_CTX_new(meth);
+    if (NULL == ctx) {
+        std::cerr << "unable to create SSL ctx" << std::endl;
+        abort();
+    }
+
+    /* Load the RSA CA certificate into the SSL_CTX structure */
+    /* This will allow this client to verify the server's     */
+    /* certificate.                                           */
+    
+    const std::string RSA_SERVER_CERT("./cluster.cert");
+    const std::string RSA_SERVER_KEY("./cluster.key");
+    /* Load the server certificate into the SSL_CTX structure */
+    if (SSL_CTX_use_certificate_file(ctx, RSA_SERVER_CERT.c_str(), SSL_FILETYPE_PEM) <= 0) {        
+        ERR_print_errors_fp(stderr);
+        abort();
+    }
+ 
+    /* Load the private-key corresponding to the server certificate */
+    if (SSL_CTX_use_PrivateKey_file(ctx, RSA_SERVER_KEY.c_str(), SSL_FILETYPE_PEM) <= 0) {        
+        ERR_print_errors_fp(stderr);
+        abort();
+    }
+    
+    /* Check if the server certificate and private-key matches */
+    if (!SSL_CTX_check_private_key(ctx)) {
+        fprintf(stderr,"Private key does not match the certificate public key\n");
+        abort();
+    }
+
 }
 
 inline void addToEpoll(int newFd, int epollFd) {
@@ -65,24 +108,57 @@ void Worker::run() {
         if (event.data.fd == multiConn) {
             int newFd = getNewFileDescriptor(event.data.fd);
             addToEpoll(newFd, epollFd);
+            if (secure) {
+                SSL* sslTemp = SSL_new(ctx);
+                if (NULL == sslTemp) {
+                    std::cerr << "unable to create new SSL connection" << std::endl;
+                    abort();
+                }
+                ssl[newFd] = sslTemp;
+                // flag it as server side
+                SSL_set_accept_state(sslTemp);
+
+                int err = SSL_set_fd(sslTemp, newFd);
+                if (err == 0) {
+                    std::cerr << "unable to set socket into ssl structure" << std::endl;
+                    abort();
+                }
+                err = SSL_accept(sslTemp);
+                while (err < 1 ) {
+                    err = SSL_accept(sslTemp);
+                }
+                if (err == 0) {
+                    std::cerr << "unable to negotiate ssl handshake" << std::endl;
+                    abort();
+                }
+            }
         } else {
             // handle client data
             static const unsigned int messageLength = 200; 
             char message[messageLength];
-            int in = recv(event.data.fd, &message, messageLength-1, 0);
-            message[in]='\0';
-            if (in > 0) {
-                printf("%d:%s\n", in, message);
+            int bytesRead=0;
+            if (secure) {
+                bytesRead = SSL_read(ssl[event.data.fd], &message, messageLength);
             } else {
-                if (in <= 0) {
+                bytesRead = recv(event.data.fd, &message, messageLength-1, 0);
+            }
+            if (bytesRead > 0) {
+                message[bytesRead]='\0';
+                printf("%d:%s\n", bytesRead, message);
+            } else {
+                if (bytesRead <= 0) {
+                    SSL_shutdown(ssl[event.data.fd]);
                     std::cout << "connection error or closed" << std::endl;
                     removeFromEpoll(event.data.fd, epollFd);
                     close(event.data.fd);
+                    SSL_free(ssl[event.data.fd]);
+                    ssl.erase(event.data.fd);
                 }                        
             }
         }
     }
     close(multiConn);
+    SSL_CTX_free(ctx);
 }
 
 int Worker::getNewFileDescriptor(int socket) {
@@ -159,14 +235,14 @@ int Worker::setupConnection() {
 
 void Worker::parseOptions(int argc, char** argv) {
         
-    unsigned int maxClients=5;
     domainPath = "/tmp/shared.fd";
-
+    secure = false;
    try {
         boost::program_options::options_description desc("Options");
         desc.add_options()
         ("help", "print help messages")
         ("domainPath,d", boost::program_options::value<std::string>(&domainPath), "file to be used as name for domain socket")
+        ("secure,s", boost::program_options::bool_switch(&secure), "use ssl for communications")
         ;
         try {
             store(parse_command_line(argc, argv, desc), options_map);
@@ -185,8 +261,14 @@ void Worker::parseOptions(int argc, char** argv) {
         std::cout << "some other parse error " << e.what() << std::endl; 
         throw;
     }    
-    std::cout << "mac clients supported " << maxClients << std::endl;    
-    return;
+
+   if (secure) {
+       std::cout << "Will serve only secure connections" << std::endl;
+   } else {
+       std::cout << "Will serve plain text connections" << std::endl;
+   }
+
+   return;
 }
 
 
