@@ -42,7 +42,6 @@ inline void removeFromEpoll(int removedFd, int epollFd) {
     event.data.fd = removedFd;
     if (epoll_ctl(epollFd, EPOLL_CTL_DEL, removedFd, &event) != 0) {
         perror("epoll_ctr remove fd failed.");
-        abort();
     }
 }
 
@@ -129,8 +128,17 @@ void MultiConnector::run() {
                     for (WorkerList::iterator iter = workerList.begin();
                          iter != workerList.end();
                          iter++) {
-                        std::cout << "list: " << iter->second.registration << " match: " << identifier << std::endl;
+                        // std::cout << "list: " << iter->second.registration << " match: " << identifier << std::endl;
                         if (iter->second.registration == identifier) {
+                             if (iter->second.secure != secure) {
+                                 removeFromEpoll(event.data.fd, epollFd);
+                                 std::stringstream reply;
+                                 reply << "Failed registration: Your registration matches, but your security mode does not";
+                                 send(event.data.fd, reply.str().c_str(), reply.str().size(), 0); 
+                                 close(event.data.fd);
+                                 numClients--;
+                                 continue;
+                             }
                             removeFromEpoll(event.data.fd, epollFd);
                             sendFd(event.data.fd, iter->first);                        
                             std::stringstream reply;
@@ -142,9 +150,12 @@ void MultiConnector::run() {
                             continue;
                         }
                     }
+                    removeFromEpoll(event.data.fd, epollFd);
                     std::stringstream reply;
-                    reply << "no process registered for id=" << identifier;
+                    reply << "Failed Registration: No process registered for id=" << identifier;
                     send(event.data.fd, reply.str().c_str(), reply.str().size(), 0); 
+                    close(event.data.fd);
+                    numClients--;
                 } 
             } else {
                 if (in <= 0) {
