@@ -19,7 +19,6 @@
 
 #include <sys/epoll.h>
 
-static const unsigned int MAXLINE=200;
 
 
 MultiConnector::MultiConnector(int argc, char** argv) {
@@ -88,78 +87,20 @@ void MultiConnector::run() {
 
         if (event.data.fd == clientSocket) {
             int newFd = getNewClientConnection(event.data.fd);
-            if (newFd > 0) {
-                // if we have workers let them handle it
-                if (workerList.size() != 0) {
-                    int fdToAssignTo=-1;
-                    int fdCount = 9999;
-                    for (WorkerList::iterator iter = workerList.begin();
-                         iter != workerList.end();
-                         iter++) {
-                        if (iter->second.useCount < fdCount) {
-                            fdToAssignTo = iter->first;
-                            fdCount = iter->second.useCount;
-                        }
-                    }
-                    workerList[fdToAssignTo].useCount = fdCount+1;
-                    std::stringstream reply;
-                    reply << "There are " << workerList.size() << " workers, your assigned to pid " << workerList[fdToAssignTo].credentials.pid;
-                    send(newFd, reply.str().c_str(), reply.str().size(), 0); 
-                    sendFd(newFd, fdToAssignTo);                        
-                    close(newFd);
-                } else {
-                    // else we'll handle it ourselves     
-                    std::stringstream reply;
-                    reply << "There are no workers, server will deal with you";
-                    send(newFd, reply.str().c_str(), reply.str().size(), 0); 
-                    numClients++;
-                    waitOnFirstConnection=false;
-                    addToEpoll(newFd, epollFd);
-                }
-            } 
+            numClients++;
+            waitOnFirstConnection=false;
+            addToEpoll(newFd, epollFd);
         } else if (event.data.fd == v6ClientSocket) {
-            int newFd = getNewClientConnection(event.data.fd);
-            if (newFd > 0) {
-                // if we have workers let them handle it
-                if (workerList.size() != 0) {
-                    int fdToAssignTo=-1;
-                    int fdCount = 9999;
-                    for (WorkerList::iterator iter = workerList.begin();
-                         iter != workerList.end();
-                         iter++) {
-                        if (iter->second.useCount < fdCount) {
-                            fdToAssignTo = iter->first;
-                            fdCount = iter->second.useCount;
-                        }
-                    }
-                    workerList[fdToAssignTo].useCount = fdCount+1;
-                    std::stringstream reply;
-                    reply << "There are " << workerList.size() << " workers, your assigned to pid " << workerList[fdToAssignTo].credentials.pid;
-                    send(newFd, reply.str().c_str(), reply.str().size(), 0); 
-                    sendFd(newFd, fdToAssignTo);                        
-                    close(newFd);
-                } else {
-                    // else we'll handle it ourselves     
-                    numClients++;
-                    waitOnFirstConnection=false;
-                    addToEpoll(newFd, epollFd);
-                }
-            } 
-        } else if (event.data.fd == domainSocket) {
+            int newFd = getNewClientConnection(event.data.fd);            
+            numClients++;
+            waitOnFirstConnection=false;
+            addToEpoll(newFd, epollFd);
+        } else if (event.data.fd == domainSocket) {            
             int newFd = getNewWorkerConnection(event.data.fd);
             if (newFd > 0) {
                 addToEpoll(newFd, epollFd);
-                WorkerData workData;
-                workData.useCount = 0;
-                socklen_t ucred_length = sizeof(workData.credentials);
-                if (getsockopt(newFd,
-                               SOL_SOCKET,
-                               SO_PEERCRED,
-                               &workData.credentials,
-                               &ucred_length)) {
-                        std::cout << "unable to get credentials for fd " << newFd << std::endl;
-                    }
-                workerList[newFd] = workData;
+                WorkerData workData(newFd);
+                workerList.insert( std::pair<int, MultiConnector::WorkerData>(newFd, workData));
                 waitOnFirstConnection=false;
             }
         } else {
@@ -169,7 +110,42 @@ void MultiConnector::run() {
             int in = recv(event.data.fd, &message, messageLength-1, 0);
             message[in]='\0';
             if (in > 0) {
-                std::cout << message << std::endl;
+                WorkerList::iterator iter = workerList.find(event.data.fd);
+                if (iter != workerList.end()) {
+                    std::cout <<"w: " << message << std::endl;
+                    unsigned int identifier = 0;
+                    int secure = true;
+                    sscanf(message, "%d %d", &identifier, &secure);
+                    iter->second.registration = identifier;
+                    iter->second.secure = secure;
+                    std::cout << "server " << identifier  << " secure " << secure << "registered" << std::endl;                    
+                } else {
+                    std::cout << "c: " << message << std::endl;
+                    unsigned int identifier = 0;
+                    int secure = true;
+                    sscanf(message, "%d %d", &identifier, &secure);
+                    std::cout << "register to " << identifier  << " secure " << secure << std::endl;
+                    // if we have workers let them handle it
+                    for (WorkerList::iterator iter = workerList.begin();
+                         iter != workerList.end();
+                         iter++) {
+                        std::cout << "list: " << iter->second.registration << " match: " << identifier << std::endl;
+                        if (iter->second.registration == identifier) {
+                            removeFromEpoll(event.data.fd, epollFd);
+                            sendFd(event.data.fd, iter->first);                        
+                            std::stringstream reply;
+                            iter->second.useCount ++;
+                            reply << "There are " << workerList.size() << " workers, your assigned to pid " << iter->second.credentials.pid;
+                            send(event.data.fd, reply.str().c_str(), reply.str().size(), 0); 
+                            close(event.data.fd);                        
+                            numClients--;
+                            continue;
+                        }
+                    }
+                    std::stringstream reply;
+                    reply << "no process registered for id=" << identifier;
+                    send(event.data.fd, reply.str().c_str(), reply.str().size(), 0); 
+                } 
             } else {
                 if (in <= 0) {
                     std::cout << "connection error or closed" << std::endl;
@@ -405,4 +381,20 @@ int MultiConnector::setupClientV4Socket() {
         return -1;
     }
     return cSocket;
+}
+
+MultiConnector::WorkerData::WorkerData(int fd) 
+    : useCount(0),
+      secure(false),
+      registration(0),
+      state(connected)
+{
+    socklen_t ucred_length = sizeof(credentials);
+    if (getsockopt(fd,
+                   SOL_SOCKET,
+                   SO_PEERCRED,
+                   &credentials,
+                   &ucred_length)) {
+        std::cout << "unable to get credentials for fd " << fd << std::endl;
+    }
 }

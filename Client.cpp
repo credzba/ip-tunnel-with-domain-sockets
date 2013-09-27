@@ -83,6 +83,10 @@ void Client::run() {
         perror("Connect");
         abort();
     }
+    std::stringstream registration;
+    registration << identifier << " " << secure;
+    send(sock, registration.str().c_str(), registration.str().size(), 0); 
+
     FD_SET(sock, &fds);
     if (sock > fdMax) { fdMax = sock; }
 
@@ -167,10 +171,12 @@ void Client::parseOptions(int argc, char** argv) {
     connectPort = 6789;
     connectorAddress = "127.0.0.1";
     secure = false;
+    identifier = 123456;
     try {
         boost::program_options::options_description desc("Options");
         desc.add_options()
         ("help", "print help messages")
+        ("identifier,id", boost::program_options::value<unsigned int>(&identifier), "identifier used for communications")
         ("port,p", boost::program_options::value<unsigned int>(&connectPort), "port to connect to")
         ("ip,i", boost::program_options::value<std::string>(&connectorAddress), "port to connect to")
         ("secure,s", boost::program_options::bool_switch(&secure), "use ssl for communications")

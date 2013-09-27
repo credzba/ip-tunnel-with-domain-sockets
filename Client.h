@@ -18,6 +18,7 @@ private:
 
 private:    
     // variables
+    unsigned int identifier;
     unsigned int connectPort;
     std::string connectorAddress;
     bool secure;

@@ -21,6 +21,7 @@ private:
 
 private:    
     // variables
+    unsigned int identifier;
     std::string domainPath;
     bool secure;
 

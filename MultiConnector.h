@@ -37,9 +37,14 @@ private:
     int v6ClientSocket;
 
     struct WorkerData {
+        WorkerData(int fd);
         int useCount;
         ucred credentials;
+        bool secure;
+        unsigned registration;
+        enum {connected, registered } state;
     };
+
     typedef std::map<int, WorkerData> WorkerList;
     WorkerList workerList;
 

@@ -93,8 +93,11 @@ void Worker::run() {
     epoll_event event;
 
     int multiConn = setupConnection();
-
     addToEpoll(multiConn, epollFd);
+    std::stringstream registration;
+    registration << identifier << " " << secure;
+    send(multiConn, registration.str().c_str(), registration.str().size(), 0); 
+
 
     while(1) {
         int fds = epoll_wait(epollFd, &event, 1, -1);
@@ -147,12 +150,14 @@ void Worker::run() {
                 printf("%d:%s\n", bytesRead, message);
             } else {
                 if (bytesRead <= 0) {
-                    SSL_shutdown(ssl[event.data.fd]);
+                    if (secure) {
+                        SSL_shutdown(ssl[event.data.fd]);
+                        SSL_free(ssl[event.data.fd]);
+                        ssl.erase(event.data.fd);
+                    }
                     std::cout << "connection error or closed" << std::endl;
                     removeFromEpoll(event.data.fd, epollFd);
                     close(event.data.fd);
-                    SSL_free(ssl[event.data.fd]);
-                    ssl.erase(event.data.fd);
                 }                        
             }
         }
@@ -208,6 +213,8 @@ int Worker::getNewFileDescriptor(int socket) {
             bytesReceived -= 2;
         }
     }
+
+    std::cout << "acepted new file descriptor " << newfd << std::endl; 
     return newfd;
 }
 
@@ -228,6 +235,7 @@ int Worker::setupConnection() {
         perror("unable to connect to multiConnector server .. terminating");
         abort();
     }
+
     return multiConn;
 }
 
@@ -237,10 +245,12 @@ void Worker::parseOptions(int argc, char** argv) {
         
     domainPath = "/tmp/shared.fd";
     secure = false;
+    identifier = 123456;
    try {
         boost::program_options::options_description desc("Options");
         desc.add_options()
         ("help", "print help messages")
+        ("identifier,id", boost::program_options::value<unsigned int>(&identifier), "identifier used for communications")
         ("domainPath,d", boost::program_options::value<std::string>(&domainPath), "file to be used as name for domain socket")
         ("secure,s", boost::program_options::bool_switch(&secure), "use ssl for communications")
         ;
